@@ -25,11 +25,14 @@ Usage:
   blinkstick-monitor --check-once     # one-shot: check, set LED, exit
 
 Config: /etc/blinkstick-monitor.conf (JSON, auto-generated, editable)
+  container_blacklist_patterns: list of glob patterns (e.g. "lotus-sandbox-*")
+    that are excluded from detection during --reconfigure and preserved across runs.
 Send SIGHUP to the running service to reload config without restart:
   systemctl kill -s HUP blinkstick-monitor
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import signal
@@ -65,6 +68,7 @@ DEFAULT_CONFIG = {
     'expected_mounts': [],
     'monitor_services': False,
     'expected_services': [],
+    'container_blacklist_patterns': [],
     'led_count': 2,
 }
 
@@ -88,6 +92,14 @@ def run(cmd, timeout=10):
         return 'command timed out', 1
     except Exception as e:
         return str(e), 1
+
+
+def is_blacklisted(name, patterns):
+    """Check if a container name matches any blacklist pattern (supports wildcards)."""
+    for pattern in patterns:
+        if fnmatch.fnmatch(name, pattern):
+            return True
+    return False
 
 
 def detect_user_services():
@@ -126,15 +138,29 @@ def detect_user_services():
     return services
 
 
-def detect_config():
-    """Snapshot current system state as the 'known good' baseline."""
+def detect_config(blacklist=None):
+    """Snapshot current system state as the 'known good' baseline.
+
+    Args:
+        blacklist: list of glob patterns for container names to exclude.
+                   Preserved across reconfigures so ephemeral containers
+                   (sandboxes, one-off jobs, etc.) never enter the baseline.
+    """
     config = dict(DEFAULT_CONFIG)
+    if blacklist:
+        config['container_blacklist_patterns'] = list(blacklist)
 
     # Docker: only track containers currently in "Up" state
     out, rc = run(['docker', 'ps', '--format', '{{.Names}}'])
     if rc == 0 and out:
         config['monitor_docker'] = True
-        config['expected_containers'] = sorted(out.splitlines())
+        containers = sorted(out.splitlines())
+        if blacklist:
+            skipped = [c for c in containers if is_blacklisted(c, blacklist)]
+            containers = [c for c in containers if not is_blacklisted(c, blacklist)]
+            if skipped:
+                log.info(f'Blacklist filtered out: {", ".join(skipped)}')
+        config['expected_containers'] = containers
     elif rc == 127:
         log.info('Docker not installed — skipping container monitoring')
 
@@ -456,9 +482,18 @@ def cmd_check_once(config):
 
 
 def cmd_reconfigure():
-    """Re-detect current state and overwrite config."""
+    """Re-detect current state and overwrite config.
+
+    Preserves container_blacklist_patterns from the existing config so
+    ephemeral containers stay excluded across reconfigures.
+    """
     log.info('Re-detecting current system state...')
-    config = detect_config()
+    # Carry forward the blacklist from the existing config
+    existing = load_config()
+    blacklist = existing.get('container_blacklist_patterns', []) if existing else []
+    if blacklist:
+        log.info(f'Preserving blacklist patterns: {", ".join(blacklist)}')
+    config = detect_config(blacklist=blacklist)
     save_config(config)
     print_config(config)
     print(f'\nConfig written to {CONFIG_PATH}')
