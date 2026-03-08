@@ -7,7 +7,7 @@ A homelab monitoring daemon that uses a BlinkStick USB LED to show system health
 | Color    | Meaning                                                          |
 |----------|------------------------------------------------------------------|
 | GREEN    | All systems healthy                                              |
-| RED      | Critical issue — container down, drive missing, mount gone       |
+| RED      | Critical issue — container/service down, drive missing, mount gone |
 | YELLOW   | Warning — disk filling up (>85%), high system load               |
 | BLUE     | Monitor is starting up / initializing                            |
 | OFF      | Monitor is not running                                           |
@@ -28,12 +28,13 @@ The installer will:
 2. Install udev rules for BlinkStick USB access
 3. Install the blinkstick Python package from source
 4. Install the monitor script to `/usr/local/bin/blinkstick-monitor`
-5. Auto-detect the current system state (docker containers, drives, mounts) as "healthy"
+5. Auto-detect the current system state (services, docker containers, drives, mounts) as "healthy"
 6. Create and enable a systemd service
 
 ## What It Monitors
 
 - **Docker containers** — detects all running containers at install time; alerts if any stop or crash
+- **Systemd services** — detects user-created services (in `/etc/systemd/system/`) that are active; alerts if any go down (excludes timers, crons, and the monitor itself)
 - **Block devices** — NVMe, SSD, HDD; alerts if a drive disappears
 - **Mount points** — ext4, xfs, btrfs, zfs, nfs, mergerfs, etc.; alerts if a mount is lost
 - **Disk usage** — warns when any filesystem exceeds 85% (configurable)
@@ -80,6 +81,11 @@ Example:
   "load_warn_multiplier": 2.0,
   "boot_delay": 30,
   "monitor_docker": true,
+  "monitor_services": true,
+  "expected_services": [
+    "my-webapp.service",
+    "my-api.service"
+  ],
   "expected_containers": [
     "my-app",
     "my-db",
@@ -108,13 +114,15 @@ Example:
 | `boot_delay`           | 30      | Seconds to wait after boot before first check      |
 | `monitor_docker`       | auto    | Whether to check docker containers                 |
 | `expected_containers`  | auto    | List of container names that should be running     |
+| `monitor_services`     | auto    | Whether to check user-created systemd services     |
+| `expected_services`    | auto    | List of .service unit names that should be active  |
 | `expected_block_devices` | auto  | Block device names that should be present          |
 | `expected_mounts`      | auto    | Mount point paths that should be mounted           |
 | `led_count`            | auto    | Number of LEDs on the BlinkStick                   |
 
 ## Updating the Baseline
 
-When you change your setup (add containers, add a drive, etc.):
+When you change your setup (add services, containers, drives, etc.):
 
 ```bash
 # Make sure the system is in a good state, then:

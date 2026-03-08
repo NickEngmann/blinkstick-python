@@ -6,6 +6,7 @@ Monitors system health and reflects status on a BlinkStick USB LED.
 
 Checks:
   - Docker containers (expected ones running)
+  - Systemd services (user-created .service units)
   - Block devices present (NVMe, SSD, HDD)
   - Mount points accessible
   - Disk usage thresholds
@@ -62,6 +63,8 @@ DEFAULT_CONFIG = {
     'expected_containers': [],
     'expected_block_devices': [],
     'expected_mounts': [],
+    'monitor_services': False,
+    'expected_services': [],
     'led_count': 2,
 }
 
@@ -87,6 +90,42 @@ def run(cmd, timeout=10):
         return str(e), 1
 
 
+def detect_user_services():
+    """Find user-created systemd services that are currently active.
+
+    Only considers regular .service files in /etc/systemd/system/ (not symlinks,
+    which are typically distro-managed aliases like dbus-org.*.service).
+    Skips timers, cron-like units, and the blinkstick monitor itself.
+    """
+    services = []
+    skip_patterns = {'blinkstick-monitor', 'cron', 'anacron', 'atd'}
+
+    # List regular .service files (not symlinks) the user created
+    # Symlinks in /etc/systemd/system/ are distro-managed (dbus aliases, display-manager, etc.)
+    out, rc = run(['find', '/etc/systemd/system/', '-maxdepth', '1',
+                   '-name', '*.service', '-type', 'f'])
+    if rc != 0:
+        return services
+
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        unit_name = os.path.basename(line)
+
+        # Skip cron-related and ourselves
+        base = unit_name.replace('.service', '')
+        if any(skip in base.lower() for skip in skip_patterns):
+            continue
+
+        # Only include if currently active
+        _, active_rc = run(['systemctl', 'is-active', '--quiet', unit_name])
+        if active_rc == 0:
+            services.append(unit_name)
+
+    return services
+
+
 def detect_config():
     """Snapshot current system state as the 'known good' baseline."""
     config = dict(DEFAULT_CONFIG)
@@ -98,6 +137,13 @@ def detect_config():
         config['expected_containers'] = sorted(out.splitlines())
     elif rc == 127:
         log.info('Docker not installed — skipping container monitoring')
+
+    # Systemd services: user-created .service units in /etc/systemd/system/
+    # Excludes timers, cron-like units, and the blinkstick monitor itself
+    user_services = detect_user_services()
+    if user_services:
+        config['monitor_services'] = True
+        config['expected_services'] = sorted(user_services)
 
     # Block devices: real disks only (skip loops and boot partitions)
     out, rc = run(['lsblk', '-d', '-n', '-o', 'NAME,TYPE'])
@@ -224,6 +270,24 @@ def check_docker(config):
     return issues
 
 
+def check_services(config):
+    issues = []
+    if not config.get('monitor_services'):
+        return issues
+
+    for unit in config.get('expected_services', []):
+        _, rc = run(['systemctl', 'is-active', '--quiet', unit])
+        if rc != 0:
+            # Check if the unit still exists (may have been intentionally removed)
+            _, exists_rc = run(['systemctl', 'cat', unit])
+            if exists_rc != 0:
+                issues.append(('warning', f'Service removed: {unit}'))
+            else:
+                issues.append(('critical', f'Service down: {unit}'))
+
+    return issues
+
+
 def check_block_devices(config):
     issues = []
     out, rc = run(['lsblk', '-d', '-n', '-o', 'NAME'])
@@ -296,6 +360,7 @@ def check_load(config):
 def run_all_checks(config):
     all_issues = []
     all_issues.extend(check_docker(config))
+    all_issues.extend(check_services(config))
     all_issues.extend(check_block_devices(config))
     all_issues.extend(check_mounts(config))
     all_issues.extend(check_disk_usage(config))
