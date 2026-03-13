@@ -396,6 +396,9 @@ def check_disk_usage(config):
                 pct = int(parts[0].replace('%', ''))
                 target = parts[1]
                 if pct >= threshold:
+                    mount_bl = config.get('mount_blacklist_patterns', [])
+                    if mount_bl and is_blacklisted(target, mount_bl):
+                        continue
                     issues.append(('warning', f'Disk {target} at {pct}%'))
             except ValueError:
                 pass
