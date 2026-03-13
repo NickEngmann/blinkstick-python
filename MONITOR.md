@@ -47,7 +47,7 @@ The installer will:
 sudo blinkstick-monitor --status
 
 # Re-detect current state as the new "healthy" baseline
-# Use this after adding containers, drives, or mounts
+# Use this after adding containers, drives, services, or mounts
 sudo blinkstick-monitor --reconfigure
 
 # Or use the install script shortcut
@@ -67,6 +67,29 @@ journalctl -u blinkstick-monitor -f
 
 # Uninstall
 sudo ./install-monitor.sh --uninstall
+```
+
+## Quiet Hours
+
+LEDs turn off during a configurable time window (checks still run and log). Enabled by default: 23:00 - 07:00.
+
+```bash
+# Check quiet hours status
+sudo blinkstick-monitor --quiet-hours status
+
+# Enable with current times
+sudo blinkstick-monitor --quiet-hours on
+
+# Disable
+sudo blinkstick-monitor --quiet-hours off
+
+# Set custom window (e.g. 10pm to 6am)
+sudo blinkstick-monitor --quiet-hours 22:00-06:00
+```
+
+After changing, reload the running service:
+```bash
+sudo systemctl kill -s HUP blinkstick-monitor
 ```
 
 ## Configuration
@@ -100,6 +123,15 @@ Example:
     "/mnt/data",
     "/mnt/backup"
   ],
+  "container_blacklist_patterns": [
+    "lotus-sandbox-*"
+  ],
+  "mount_blacklist_patterns": [
+    "/mnt/nvme*"
+  ],
+  "quiet_hours_enabled": true,
+  "quiet_hours_start": "23:00",
+  "quiet_hours_end": "07:00",
   "led_count": 2
 }
 ```
@@ -118,6 +150,11 @@ Example:
 | `expected_services`    | auto    | List of .service unit names that should be active  |
 | `expected_block_devices` | auto  | Block device names that should be present          |
 | `expected_mounts`      | auto    | Mount point paths that should be mounted           |
+| `container_blacklist_patterns` | `[]` | Glob patterns for containers to ignore (e.g. `"lotus-sandbox-*"`) |
+| `mount_blacklist_patterns` | `[]` | Glob patterns for mounts to ignore (e.g. `"/mnt/nvme*"`) |
+| `quiet_hours_enabled`  | `true`  | Turn LEDs off during quiet hours                   |
+| `quiet_hours_start`    | `23:00` | Start of quiet hours (HH:MM, 24h)                 |
+| `quiet_hours_end`      | `07:00` | End of quiet hours (HH:MM, 24h)                   |
 | `led_count`            | auto    | Number of LEDs on the BlinkStick                   |
 
 ## Updating the Baseline

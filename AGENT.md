@@ -40,9 +40,20 @@ blinkstick-python/
 4. SIGHUP: reloads config from disk without restart
 
 ### Check Priority
-- Critical (RED): container down/missing, block device gone, mount missing
-- Warning (YELLOW): disk >85%, load > 2x CPUs
+- Critical (RED): container down/missing, service down, block device gone, mount missing
+- Warning (YELLOW): disk >85%, load > 2x CPUs, service removed
 - OK (GREEN): everything passing
+
+### Blacklists
+- `container_blacklist_patterns`: glob patterns to exclude containers from detection (e.g. `"lotus-sandbox-*"`)
+- `mount_blacklist_patterns`: glob patterns to exclude mounts (e.g. `"/mnt/nvme*"`)
+- Both use `fnmatch` and persist across `--reconfigure`
+
+### Quiet Hours
+- `quiet_hours_enabled`, `quiet_hours_start`, `quiet_hours_end`
+- LEDs turn off during the window; health checks still run and log
+- Handles overnight spans (e.g. 23:00 -> 07:00)
+- CLI: `--quiet-hours on|off|status|HH:MM-HH:MM`
 
 ### Resilience Features
 - Boot delay (default 30s) — waits for docker/mounts after reboot
@@ -91,5 +102,7 @@ journalctl -u blinkstick-monitor -f
 - `findmnt --raw` doesn't work on all systems — use `findmnt -n -l` without `--raw`
 - `findmnt` output is space-padded; use `.strip()` or `rsplit(None, 1)` when parsing
 - Docker containers detected with `docker ps` (running only), not `docker ps -a`
+- User services detected by looking for regular files (not symlinks) in `/etc/systemd/system/`
+- `is_blacklisted()` uses `fnmatch.fnmatch()` for glob matching (supports `*`, `?`, `[seq]`)
 - The service runs as root (needed for USB + docker access)
 - Color values are intentionally dim (64 max, not 255) to avoid blinding in dark server rooms

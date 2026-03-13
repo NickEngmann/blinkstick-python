@@ -44,6 +44,7 @@ setup(
     url='http://pypi.python.org/pypi/BlinkStick/',
     license='LICENSE.txt',
     description='Python package to control BlinkStick USB devices.',
-    long_description=read('README.rst'),
+    long_description=read('README.md'),
+    long_description_content_type='text/markdown',
     install_requires=os_requires,
 )
