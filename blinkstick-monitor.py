@@ -32,6 +32,7 @@ Send SIGHUP to the running service to reload config without restart:
 """
 
 import argparse
+from datetime import datetime
 import fnmatch
 import json
 import os
@@ -69,6 +70,10 @@ DEFAULT_CONFIG = {
     'monitor_services': False,
     'expected_services': [],
     'container_blacklist_patterns': [],
+    'mount_blacklist_patterns': [],
+    'quiet_hours_enabled': True,
+    'quiet_hours_start': '23:00',
+    'quiet_hours_end': '07:00',
     'led_count': 2,
 }
 
@@ -100,6 +105,23 @@ def is_blacklisted(name, patterns):
         if fnmatch.fnmatch(name, pattern):
             return True
     return False
+
+
+def is_quiet_hours(config):
+    """Check if current time falls within quiet hours (LEDs off)."""
+    if not config.get('quiet_hours_enabled', False):
+        return False
+    try:
+        now = datetime.now().strftime('%H:%M')
+        start = config.get('quiet_hours_start', '23:00')
+        end = config.get('quiet_hours_end', '07:00')
+        # Handle overnight spans (e.g. 23:00 -> 07:00)
+        if start <= end:
+            return start <= now < end
+        else:
+            return now >= start or now < end
+    except Exception:
+        return False
 
 
 def detect_user_services():
@@ -138,17 +160,25 @@ def detect_user_services():
     return services
 
 
-def detect_config(blacklist=None):
+def detect_config(blacklist=None, mount_blacklist=None, preserve_config=None):
     """Snapshot current system state as the 'known good' baseline.
 
     Args:
         blacklist: list of glob patterns for container names to exclude.
-                   Preserved across reconfigures so ephemeral containers
-                   (sandboxes, one-off jobs, etc.) never enter the baseline.
+        mount_blacklist: list of glob patterns for mount points to exclude.
+        preserve_config: existing config dict — quiet hours and blacklist
+                         settings are carried forward from here.
     """
     config = dict(DEFAULT_CONFIG)
+    # Carry forward user preferences from existing config
+    if preserve_config:
+        for key in ('quiet_hours_enabled', 'quiet_hours_start', 'quiet_hours_end'):
+            if key in preserve_config:
+                config[key] = preserve_config[key]
     if blacklist:
         config['container_blacklist_patterns'] = list(blacklist)
+    if mount_blacklist:
+        config['mount_blacklist_patterns'] = list(mount_blacklist)
 
     # Docker: only track containers currently in "Up" state
     out, rc = run(['docker', 'ps', '--format', '{{.Names}}'])
@@ -194,6 +224,9 @@ def detect_config(blacklist=None):
                 target = parts[0].strip()
                 fstype = parts[1].strip()
                 if fstype in real_fstypes:
+                    if mount_blacklist and is_blacklisted(target, mount_blacklist):
+                        log.info(f'Mount blacklist filtered out: {target}')
+                        continue
                     config['expected_mounts'].append(target)
 
     # Auto-detect LED count by probing
@@ -484,22 +517,78 @@ def cmd_check_once(config):
 def cmd_reconfigure():
     """Re-detect current state and overwrite config.
 
-    Preserves container_blacklist_patterns from the existing config so
-    ephemeral containers stay excluded across reconfigures.
+    Preserves blacklist patterns and quiet hours from the existing config.
     """
     log.info('Re-detecting current system state...')
-    # Carry forward the blacklist from the existing config
     existing = load_config()
     blacklist = existing.get('container_blacklist_patterns', []) if existing else []
+    mount_blacklist = existing.get('mount_blacklist_patterns', []) if existing else []
     if blacklist:
-        log.info(f'Preserving blacklist patterns: {", ".join(blacklist)}')
-    config = detect_config(blacklist=blacklist)
+        log.info(f'Preserving container blacklist: {", ".join(blacklist)}')
+    if mount_blacklist:
+        log.info(f'Preserving mount blacklist: {", ".join(mount_blacklist)}')
+    config = detect_config(blacklist=blacklist, mount_blacklist=mount_blacklist,
+                           preserve_config=existing)
     save_config(config)
     print_config(config)
     print(f'\nConfig written to {CONFIG_PATH}')
     print('Restart the monitor service to pick up changes:')
     print('  sudo systemctl restart blinkstick-monitor')
     return 0
+
+
+def cmd_quiet_hours(arg):
+    """Manage quiet hours from the command line."""
+    config = load_or_create_config()
+    reload_hint = '  (send SIGHUP to reload: sudo systemctl kill -s HUP blinkstick-monitor)'
+
+    if arg == 'status':
+        enabled = config.get('quiet_hours_enabled', False)
+        start = config.get('quiet_hours_start', '23:00')
+        end = config.get('quiet_hours_end', '07:00')
+        state = 'ON' if enabled else 'OFF'
+        active = ' (currently in quiet hours)' if enabled and is_quiet_hours(config) else ''
+        print(f'Quiet hours: {state}  ({start} – {end}){active}')
+        return 0
+
+    if arg == 'on':
+        config['quiet_hours_enabled'] = True
+        save_config(config)
+        start = config.get('quiet_hours_start', '23:00')
+        end = config.get('quiet_hours_end', '07:00')
+        print(f'Quiet hours enabled: {start} – {end}')
+        print(reload_hint)
+        return 0
+
+    if arg == 'off':
+        config['quiet_hours_enabled'] = False
+        save_config(config)
+        print('Quiet hours disabled')
+        print(reload_hint)
+        return 0
+
+    # Parse HH:MM-HH:MM format
+    if '-' in arg:
+        parts = arg.split('-', 1)
+        try:
+            # Validate both times
+            for p in parts:
+                h, m = p.split(':')
+                if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                    raise ValueError
+            config['quiet_hours_enabled'] = True
+            config['quiet_hours_start'] = parts[0]
+            config['quiet_hours_end'] = parts[1]
+            save_config(config)
+            print(f'Quiet hours set: {parts[0]} – {parts[1]}')
+            print(reload_hint)
+            return 0
+        except (ValueError, IndexError):
+            pass
+
+    print(f'Invalid argument: {arg}')
+    print('Usage: --quiet-hours on|off|status|HH:MM-HH:MM')
+    return 1
 
 
 def cmd_monitor(config):
@@ -548,6 +637,17 @@ def cmd_monitor(config):
             else:
                 log.error('Failed to reload config — keeping current')
 
+        # Quiet hours: turn LEDs off, still run checks (logged)
+        if is_quiet_hours(config):
+            if last_color is not None:
+                log.info('Quiet hours — turning LEDs off')
+                set_blinkstick_color(*COLOR_OFF, led_count)
+                last_color = None
+            # Still run checks so issues are logged
+            run_all_checks(config)
+            time.sleep(interval)
+            continue
+
         issues = run_all_checks(config)
         color, label = determine_color(issues)
 
@@ -577,6 +677,12 @@ Examples:
   blinkstick-monitor --status         Print current health check results
   blinkstick-monitor --check-once     Run one check, set LED, and exit
 
+Quiet hours (LEDs off during a time window, checks still run):
+  blinkstick-monitor --quiet-hours on
+  blinkstick-monitor --quiet-hours off
+  blinkstick-monitor --quiet-hours 22:00-06:00
+  blinkstick-monitor --quiet-hours status
+
 Config: /etc/blinkstick-monitor.conf
 Reload: systemctl kill -s HUP blinkstick-monitor
         """)
@@ -587,11 +693,16 @@ Reload: systemctl kill -s HUP blinkstick-monitor
                        help='Print current health and exit (no LED change)')
     group.add_argument('--check-once', action='store_true',
                        help='Run one check cycle, set LED, and exit')
+    group.add_argument('--quiet-hours', metavar='ARG',
+                       help='Manage quiet hours: on, off, status, or HH:MM-HH:MM')
 
     args = parser.parse_args()
 
     if args.reconfigure:
         sys.exit(cmd_reconfigure())
+
+    if args.quiet_hours is not None:
+        sys.exit(cmd_quiet_hours(args.quiet_hours))
 
     config = load_or_create_config()
 
