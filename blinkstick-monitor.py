@@ -607,10 +607,14 @@ def cmd_monitor(config):
     last_color = None
     consecutive_stick_failures = 0
 
-    # On startup, show blue briefly to indicate the monitor is alive
-    set_blinkstick_color(*COLOR_BLUE, led_count)
+    # On startup, show blue briefly — unless we're in quiet hours
     log.info('BlinkStick monitor starting')
     print_config(config)
+    if is_quiet_hours(config):
+        log.info('Starting in quiet hours — LEDs off')
+        set_blinkstick_color(*COLOR_OFF, led_count)
+    else:
+        set_blinkstick_color(*COLOR_BLUE, led_count)
 
     # Wait for system services to come up after boot
     uptime = 0
