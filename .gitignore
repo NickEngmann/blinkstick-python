@@ -35,3 +35,19 @@ nosetests.xml
 
 #idea pycharm
 .idea
+
+# Auto-added by Marisol pipeline
+.env
+.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+debug_*.py
+*.o
+
+# Auto-added by Marisol pipeline
+node_modules/
+.pio/
+.gradle/
+*.class
+local.properties
