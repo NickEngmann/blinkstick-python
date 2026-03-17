@@ -594,6 +594,116 @@ def cmd_quiet_hours(arg):
     return 1
 
 
+def cmd_history(hours):
+    """Show condensed history of issues from journald logs.
+
+    Parses WARNING/CRITICAL lines, groups consecutive identical issues into
+    time ranges, and prints a compact summary.
+    """
+    import re
+    from datetime import timedelta
+
+    out, rc = run(['journalctl', '-u', 'blinkstick-monitor', '--no-pager',
+                   '--since', f'{hours} hours ago',
+                   '-o', 'short-iso'], timeout=30)
+    if rc != 0:
+        print(f'Failed to read journal: {out}')
+        return 1
+
+    # Parse log lines for WARNING/CRITICAL and color transitions
+    # Timestamp format from journalctl -o short-iso: 2026-03-17T12:45:59-04:00
+    ts_pat = r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})'
+    issue_re = re.compile(ts_pat + r'\s+\S+\s+\S+\s+.*?(WARNING|CRITICAL): (.+)')
+    color_re = re.compile(ts_pat + r'\s+\S+\s+\S+\s+.*?Setting BlinkStick to (GREEN|YELLOW|RED)')
+    quiet_re = re.compile(ts_pat + r'\s+\S+\s+\S+\s+.*?(Quiet hours|Starting in quiet hours)')
+
+    # Collect events: (timestamp_str, type, message)
+    events = []
+    for line in out.splitlines():
+        m = issue_re.search(line)
+        if m:
+            events.append((m.group(1), m.group(2), m.group(3)))
+            continue
+        m = color_re.search(line)
+        if m:
+            events.append((m.group(1), 'COLOR', m.group(2)))
+            continue
+        m = quiet_re.search(line)
+        if m:
+            events.append((m.group(1), 'QUIET', 'LEDs off'))
+
+    if not events:
+        print(f'No issues in the last {hours} hours.')
+        return 0
+
+    # Filter to just issues and quiet hours (not color transitions)
+    issue_events = [(ts, et, msg) for ts, et, msg in events
+                    if et in ('WARNING', 'CRITICAL', 'QUIET')]
+
+    # Group issues into spans — merge if same issue recurs within 10 minutes
+    spans = []  # (first_ts, last_ts, type, message, count)
+
+    def parse_ts(ts_str):
+        try:
+            return datetime.strptime(ts_str[:19], '%Y-%m-%dT%H:%M:%S')
+        except Exception:
+            return None
+
+    for ts_str, etype, msg in issue_events:
+        # Normalize the message for grouping (strip variable load values)
+        group_key = msg
+        if 'High load:' in msg:
+            group_key = 'High load'
+        elif 'Disk' in msg and 'at' in msg:
+            group_key = re.sub(r' at \d+%', '', msg)
+
+        ts = parse_ts(ts_str)
+        last_ts = parse_ts(spans[-1][1]) if spans else None
+
+        # Merge if same issue and within 10 minutes of last occurrence
+        if (spans and spans[-1][3] == group_key and spans[-1][2] == etype
+                and ts and last_ts and (ts - last_ts) < timedelta(minutes=10)):
+            spans[-1] = (spans[-1][0], ts_str, etype, group_key, spans[-1][4] + 1)
+        else:
+            spans.append((ts_str, ts_str, etype, group_key, 1))
+
+    # Print compact output — skip GREEN/COLOR transitions, focus on issues
+    def fmt_ts(ts_str):
+        """Format ISO timestamp to readable short form."""
+        try:
+            # Parse ISO format: 2026-03-17T12:45:59+0400
+            dt = datetime.strptime(ts_str[:19], '%Y-%m-%dT%H:%M:%S')
+            now = datetime.now()
+            if dt.date() == now.date():
+                return dt.strftime('%H:%M')
+            return dt.strftime('%b %d %H:%M')
+        except Exception:
+            return ts_str[:16]
+
+    printed = False
+    for first_ts, last_ts, etype, msg, count in spans:
+        if etype == 'COLOR' and msg == 'GREEN':
+            continue  # Skip "all clear" transitions
+        if etype == 'COLOR':
+            continue  # Color changes are implied by the issues
+
+        tag = etype if etype in ('WARNING', 'CRITICAL') else etype
+        if first_ts == last_ts:
+            duration = ''
+        else:
+            duration = f' → {fmt_ts(last_ts)}'
+            if count > 1:
+                duration += f' ({count}x)'
+
+        print(f'  {fmt_ts(first_ts)}{duration}  [{tag}] {msg}')
+        printed = True
+
+    if not printed:
+        print(f'No issues in the last {hours} hours.')
+
+    return 0
+
+
 def cmd_monitor(config):
     """Main monitoring loop."""
     global _reload_requested
@@ -683,6 +793,8 @@ Examples:
   blinkstick-monitor --reconfigure    Re-snapshot current state as "healthy"
   blinkstick-monitor --status         Print current health check results
   blinkstick-monitor --check-once     Run one check, set LED, and exit
+  blinkstick-monitor --history        Show issue history (last 24h)
+  blinkstick-monitor --history 48     Show issue history (last 48h)
 
 Quiet hours (LEDs off during a time window, checks still run):
   blinkstick-monitor --quiet-hours on
@@ -700,6 +812,8 @@ Reload: systemctl kill -s HUP blinkstick-monitor
                        help='Print current health and exit (no LED change)')
     group.add_argument('--check-once', action='store_true',
                        help='Run one check cycle, set LED, and exit')
+    group.add_argument('--history', nargs='?', const=24, type=int, metavar='HOURS',
+                       help='Show condensed issue history (default: last 24h)')
     group.add_argument('--quiet-hours', metavar='ARG',
                        help='Manage quiet hours: on, off, status, or HH:MM-HH:MM')
 
@@ -707,6 +821,9 @@ Reload: systemctl kill -s HUP blinkstick-monitor
 
     if args.reconfigure:
         sys.exit(cmd_reconfigure())
+
+    if args.history is not None:
+        sys.exit(cmd_history(args.history))
 
     if args.quiet_hours is not None:
         sys.exit(cmd_quiet_hours(args.quiet_hours))
