@@ -493,17 +493,21 @@ def cmd_status(config):
     issues = run_all_checks(config)
     if not issues:
         print('STATUS: ALL OK')
-        return 0
+    else:
+        for severity, msg in issues:
+            tag = 'CRITICAL' if severity == 'critical' else 'WARNING'
+            print(f'  [{tag}] {msg}')
 
-    exit_code = 0
-    for severity, msg in issues:
-        tag = 'CRITICAL' if severity == 'critical' else 'WARNING'
-        print(f'  [{tag}] {msg}')
-        if severity == 'critical':
-            exit_code = 2
-        elif exit_code == 0:
-            exit_code = 1
-    return exit_code
+    if is_quiet_hours(config):
+        start = config.get('quiet_hours_start', '23:00')
+        end = config.get('quiet_hours_end', '07:00')
+        print(f'  [QUIET] LEDs off ({start} – {end})')
+
+    if not issues:
+        return 0
+    if any(s == 'critical' for s, _ in issues):
+        return 2
+    return 1
 
 
 def cmd_check_once(config):
