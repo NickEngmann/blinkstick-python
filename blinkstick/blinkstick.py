@@ -432,12 +432,15 @@ class BlinkStick(object):
                     red, green, blue = self._name_to_rgb(name)
             elif hex:
                 red, green, blue = self._hex_to_rgb(hex)
-        except ValueError:
+            else:
+                # Handle non-integer inputs by attempting conversion
+                red = int(red) if red is not None else 0
+                green = int(green) if green is not None else 0
+                blue = int(blue) if blue is not None else 0
+        except (ValueError, TypeError):
             red = green = blue = 0
 
         red, green, blue = _remap_rgb_value([red, green, blue], self.max_rgb_value)
-
-        # TODO - do smarts to determine input type from red var in case it is not int
 
         return red, green, blue
 
